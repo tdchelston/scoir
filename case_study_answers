@@ -1,0 +1,184 @@
+# Create table for step 4
+with base as (
+  select distinct s.gameid,
+  s.awayteamname,
+  s.hometeamname,
+  s.startTime,
+  s.duration_minutes as durationMinutes,
+  s.dayNight,
+  s.seasonId,
+  g.homeFinalRuns,
+  g.awayFinalRuns,
+  g.homeTeamId
+from bigquery-public-data.baseball.schedules s 
+left join bigquery-public-data.baseball.games_wide g on s.gameId = g.gameId
+)
+
+select gameId,
+  awayTeamName,
+  homeTeamName,
+  startTime,  
+  datetime_add(startTime, INTERVAL durationMinutes minute) as endTime,
+  durationMinutes,
+  dayNight,
+  h.averageHomeTeamDurationMinutes,
+  seasonId,
+  homeFinalRuns,
+  awayFinalRuns,
+  case when homefinalruns > awayfinalruns then hometeamname
+       when awayfinalruns > homefinalruns then awayteamname
+       else 'null'
+  end as winningTeam,
+from base
+inner join (select homeTeamId, avg(durationMinutes) as averageHomeTeamDurationMinutes from base group by 1) h on base.homeTeamId = h.homeTeamId 
+;
+
+# Show winningest team and longest game
+with base as (
+  select distinct s.gameid,
+    s.awayteamname,
+    s.hometeamname,
+    s.starttime,
+    s.duration_minutes as durationminutes,
+    s.daynight,
+    s.seasonid,
+    g.homefinalruns,
+    g.awayfinalruns,
+    g.hometeamid
+  from bigquery-public-data.baseball.schedules s
+  left join bigquery-public-data.baseball.games_wide g on s.gameid = g.gameid
+),
+
+stats as (
+  select gameid,
+    awayteamname,
+    hometeamname,
+    starttime,
+    datetime_add(starttime, interval durationminutes minute) as endtime,
+    durationminutes,
+    daynight,
+    seasonid,
+    homefinalruns,
+    awayfinalruns,
+    case when homefinalruns > awayfinalruns then hometeamname
+        when awayfinalruns > homefinalruns then awayteamname
+        else 'null'
+    end as winningteam
+  from base
+),
+
+win_count as (
+  select hometeamname,
+    sum(case when hometeamname = winningteam then 1 else 0 end) over (partition by hometeamname) as total_home_win_count,
+    max(durationminutes) over (partition by hometeamname) as longest_game_duration
+  from stats
+),
+
+best_team as (
+  select hometeamname, 
+    total_home_win_count, 
+    longest_game_duration
+  from win_count
+  order by total_home_win_count desc, longest_game_duration desc
+  limit 1
+)
+
+select a.*, 
+  b.gameid as longest_game_id
+from best_team a
+inner join stats b on a.hometeamname = b.hometeamname 
+  and a.longest_game_duration = b.durationminutes
+;
+
+
+-- summary about the game?
+
+# average speed by pitch type
+select distinct pitchTypeDescription,
+  avg(pitchSpeed) over (partition by pitchTypeDescription) as avg_pitch_speed_type,
+from bigquery-public-data.baseball.games_wide
+order by 2 desc;
+
+# what was the most common first at bat outcome?
+with first_bat as (
+select distinct
+  hitterId,
+  first_value(outcomeDescription) over (partition by hitterId order by inningNumber asc) as first_at_bat_outcome
+from bigquery-public-data.baseball.games_wide
+where 1=1
+  and inningEventType not like ('%LINEUP%')
+  and gameId = '13ebe859-b120-4a6f-8a8c-8795373ae652'
+  and hitterPitchCount = 1
+order by 1
+)
+
+select distinct first_at_bat_outcome,
+  count(first_at_bat_outcome) as first_at_bat_count
+from first_bat
+group by 1
+order by 2 desc;
+
+# How many walks & hits per inning pitched?
+select pitcherId,
+  sum(case when balls = 4 then 1 else 0 end) as total_walks,
+  sum(is_hit) as total_hits,
+  --count(distinct concat(gameId, '_', inningNumber)) as total_innings_pitched,
+  count(distinct inningNumber) as total_innings_pitched,
+  (sum(case when balls = 4 then 1 else 0 end) + sum(is_hit)) / count(distinct inningNumber) as walks_hit_per_inning_pitched,
+  'home team' as Team
+from bigquery-public-data.baseball.games_wide
+where 1=1
+  and inningEventType not like ('%LINEUP%')
+  and gameId = '13ebe859-b120-4a6f-8a8c-8795373ae652'
+  and inningHalf = 'TOP'
+group by pitcherId
+--order by walks_hit_per_inning_pitched desc
+
+union all
+
+select pitcherId,
+  sum(case when balls = 4 then 1 else 0 end) as total_walks,
+  sum(is_hit) as total_hits,
+  --count(distinct concat(gameId, '_', inningNumber)) as total_innings_pitched,
+  count(distinct inningNumber) as total_innings_pitched,
+  (sum(case when balls = 4 then 1 else 0 end) + sum(is_hit)) / count(distinct inningNumber) as walks_hit_per_inning_pitched,
+  'away team' as Team
+from bigquery-public-data.baseball.games_wide
+where 1=1
+  and inningEventType not like ('%LINEUP%')
+  and gameId = '13ebe859-b120-4a6f-8a8c-8795373ae652'
+  and inningHalf = 'BOT'
+group by pitcherId
+order by team,walks_hit_per_inning_pitched desc;
+
+
+
+
+# Using a window function, find the second longest game grouped by home team
+with base as (
+  select distinct s.gameid,
+  s.awayteamname,
+  s.hometeamname,
+  s.startTime,
+  s.duration_minutes as durationMinutes,
+  s.dayNight,
+  s.seasonId,
+  g.homeFinalRuns,
+  g.awayFinalRuns,
+  g.homeTeamId
+from bigquery-public-data.baseball.schedules s 
+left join bigquery-public-data.baseball.games_wide g on s.gameId = g.gameId
+                                                    
+)
+
+select homeTeamName, gameid, durationminutes
+from (
+  select homeTeamName, 
+         gameid, 
+         durationminutes, 
+         dense_rank() over (partition by homeTeamName order by durationminutes desc) as rank
+        # If we wanted to avoid ties in and just wanted to show the first value in second place,
+        # I would leverage row_number()
+  from base
+) as ranked_games
+where rank = 2;
